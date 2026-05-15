@@ -1,0 +1,4 @@
+# 开发：先装运行时依赖，再装可选 dev 依赖（与 pyproject.toml optional-dependencies.dev 对齐）
+-r requirements.txt
+pytest
+httpx

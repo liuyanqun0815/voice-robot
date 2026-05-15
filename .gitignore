@@ -1,0 +1,41 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Secrets & local env
+.env
+.env.local
+*.pem
+*.key
+
+# Logs & temp
+*.log
+backend/_tmp_pip/
+backend/tencent_speech.log
+
+# Node / frontend
+node_modules/
+frontend/dist/
+.vite/
+
+# Misc caches
+*.cache

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-robot-backend"
+version = "0.1.0"
+description = "FastAPI backend for voice-robot."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents",
+    "fastapi",
+    "langchain",
+    "langchain-openai",
+    "langgraph",
+    "pydantic-settings",
+    "sqlalchemy",
+    "uvicorn[standard]",
+    "websocket-client",
+    "websockets",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "live: 调用真实外部服务（Ark/TTS/ASR），需 VOICE_ROBOT_TEST_LIVE=1",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+# 仅打包应用代码；vendor/ 为本地克隆的腾讯 SDK，勿当作发行包纳入。
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["vendor*", "tests*", "*.egg-info"]
