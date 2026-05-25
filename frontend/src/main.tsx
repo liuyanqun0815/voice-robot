@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 
-import { VoicePage } from "./pages/VoicePage";
+import { App } from "./App";
 
 const container = document.getElementById("root");
 if (!container) {
@@ -10,6 +10,6 @@ if (!container) {
 
 createRoot(container).render(
   <React.StrictMode>
-    <VoicePage />
+    <App />
   </React.StrictMode>,
 );

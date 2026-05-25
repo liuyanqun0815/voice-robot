@@ -9,3 +9,4 @@ if _LIVE:
     os.environ["VOICE_ROBOT_DEEPAGENT_ENABLED"] = "true"
 else:
     os.environ["VOICE_ROBOT_MOCK_STREAMING_ENABLED"] = "true"
+os.environ.setdefault("VOICE_ROBOT_AUDIT_ENABLED", "false")

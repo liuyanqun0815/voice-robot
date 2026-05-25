@@ -1,4 +1,4 @@
-import type { AudioChunkEvent, CancelEvent, TurnCommitRequestEvent, VadEvent } from "./events";
+import type { AudioChunkEvent, CancelEvent, SessionInitEvent, TurnCommitRequestEvent, VadEvent } from "./events";
 
 export class VoiceSocket {
   private readonly ws: WebSocket;
@@ -35,6 +35,15 @@ export class VoiceSocket {
       this.ws.addEventListener("open", onOpen, { once: true });
       this.ws.addEventListener("error", onError, { once: true });
     });
+  }
+
+  sendSessionInit(event: SessionInitEvent): void {
+    if (!this.opened && this.ws.readyState !== WebSocket.OPEN) {
+      console.warn("[voice/ws] skip session_init, socket not open");
+      return;
+    }
+    console.info("[voice/ws] send session_init", event.session_id);
+    this.ws.send(JSON.stringify(event));
   }
 
   sendCommit(event: TurnCommitRequestEvent): void {

@@ -1,7 +1,14 @@
+import os
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEFAULT_GREETING_TEXT = (
+    "Hi，我是SCNet专属支持工程师，很高兴为您服务。\n"
+    "如果您有意向参与核心节点邀测计划，前往报名体验>> 。如需了解更多详情，点击下方【核心节点】专属入口咨询客服。\n"
+    "如果您有其他问题需要咨询，请在下方详细描述，我们将及时为您解答🤝"
+)
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -28,14 +35,63 @@ class Settings(BaseSettings):
     volcano_tts_sample_rate: int = 24000
     # DeepAgent model (Volcano Ark OpenAI-compatible endpoint)
     deepagent_enabled: bool = True
-    deepagent_system_prompt: str = "你是一个简洁、专业的语音助手。"
+    deepagent_system_prompt: str = (
+        "你是一个简洁、专业的超算互联网客服助手。"
+        "回答产品政策、计费试用、API、作业、平台使用等问题时，必须先调用 query_kefu_wiki 获取知识库依据，"
+        "仅根据工具返回内容作答，不要编造；知识库无依据时明确要求客户重新描述下问题，包含主语和谓语（严禁直接跟客户说主语和谓语），必要的时候反问客户意图。"
+        "答复适合客户阅读：先结论，后简短步骤，输出token控制在100个以内。"
+        "回复内容禁止体现知识库字眼，例如禁止说，我查询下知识库。"
+        "态度亲和，问答客户问题的时候，尽可能的称客户为老师，例如：老师你好，请提供你的订单号。"
+
+    )
     deepagent_ark_base_url: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
     deepagent_ark_api_key: SecretStr = SecretStr("")
     deepagent_ark_model: str = "doubao-1.5-lite-32k"
     deepagent_timeout_seconds: int = 30
     deepagent_temperature: float = 0.2
+    # wiki 检索：index 命中不足时用 Ark 从 index 选路径（对齐 llm-wiki query.py，额外 1 次 LLM）
+    wiki_query_llm_fallback_enabled: bool = False
+    wiki_query_index_llm_max_pages: int = 5
+    # 客户消息中的 http 链接：图片 OCR + 网页正文（再送入 DeepAgent）
+    link_enrichment_enabled: bool = True
+    link_enrichment_vision_model: str = ""
+    link_enrichment_timeout_seconds: int = 30
+    link_enrichment_max_urls: int = 3
+    link_enrichment_max_page_bytes: int = 512_000
+    link_enrichment_max_page_chars: int = 8000
+    link_enrichment_user_agent: str = "VoiceRobot/1.0 (+link-enrichment)"
+    link_enrichment_local_ocr_fallback_enabled: bool = True
+    # 审计落库（Phase 1）
+    audit_enabled: bool = False
+    audit_dsn: str = "sqlite:///./data/audit.db"
+    audit_store_user_text: bool = True
+    audit_max_user_text_chars: int = 2000
+    audit_admin_api_key: SecretStr = SecretStr("")
+    # 前端运维页地址（后端旧版 HTML 仪表盘重定向用）
+    frontend_ops_url: str = "http://127.0.0.1:5173/#/ops"
+    cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    # WebSocket 建连后主动下发的开场白（不经过 LLM）
+    greeting_enabled: bool = True
+    greeting_text: str = Field(default=_DEFAULT_GREETING_TEXT)
+    greeting_tts_enabled: bool = True
+    greeting_stream_chunk_chars: int = 2
+    greeting_stream_interval_ms: int = 40
     # Local fallback for dev/testing
     mock_streaming_enabled: bool = False
+
+    @field_validator("greeting_text", mode="before")
+    @classmethod
+    def _normalize_greeting_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.replace("\\n", "\n").strip()
+        return value
+    # LangSmith / LangChain tracing（使用标准环境变量名，不受 VOICE_ROBOT_ 前缀影响）
+    langchain_tracing_v2: bool = Field(default=False, validation_alias="LANGCHAIN_TRACING_V2")
+    langsmith_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
+    )
+    langchain_project: str = Field(default="", validation_alias="LANGCHAIN_PROJECT")
 
     model_config = SettingsConfigDict(
         env_prefix="VOICE_ROBOT_",
@@ -44,10 +100,29 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    def validate_live_credentials(self) -> None:
-        if self.mock_streaming_enabled:
-            return
+    def apply_langsmith_environment(self) -> None:
+        """在首次 import langchain 之前写入 os.environ，以便追踪客户端能正确初始化。"""
+        if self.langchain_tracing_v2:
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        api_key = self.langsmith_api_key.get_secret_value()
+        if api_key:
+            os.environ["LANGSMITH_API_KEY"] = api_key
+            os.environ["LANGCHAIN_API_KEY"] = api_key
+        if self.langchain_project:
+            os.environ["LANGCHAIN_PROJECT"] = self.langchain_project
 
+    def resolve_audit_dsn(self) -> str:
+        dsn = self.audit_dsn.strip()
+        if dsn.startswith("sqlite:///./"):
+            rel = dsn.removeprefix("sqlite:///./")
+            path = (_BACKEND_ROOT / rel).resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return f"sqlite:///{path.as_posix()}"
+        return dsn
+
+    def readiness_missing_items(self) -> list[str]:
+        if self.mock_streaming_enabled:
+            return []
         missing_items: list[str] = []
         if not self.tencent_asr_app_id:
             missing_items.append("VOICE_ROBOT_TENCENT_ASR_APP_ID")
@@ -59,6 +134,15 @@ class Settings(BaseSettings):
             missing_items.append("VOICE_ROBOT_VOLCANO_TTS_APP_ID")
         if not self.volcano_tts_access_token.get_secret_value():
             missing_items.append("VOICE_ROBOT_VOLCANO_TTS_ACCESS_TOKEN")
+        if self.deepagent_enabled and not self.deepagent_ark_api_key.get_secret_value():
+            missing_items.append("VOICE_ROBOT_DEEPAGENT_ARK_API_KEY")
+        return missing_items
+
+    def cors_origin_list(self) -> list[str]:
+        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    def validate_live_credentials(self) -> None:
+        missing_items = self.readiness_missing_items()
         if missing_items:
             missing_text = ", ".join(missing_items)
             raise ValueError(f"Live mode requires credentials: {missing_text}")

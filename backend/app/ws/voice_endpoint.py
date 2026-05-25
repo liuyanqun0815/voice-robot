@@ -1,8 +1,10 @@
+import asyncio
 import base64
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.metrics import WS_CONNECTIONS_ACTIVE
 from app.schemas.events import AudioChunkEvent, CancelEvent, TurnCommitRequestEvent, VadEvent
 from app.services.asr.tencent_ws_client import TencentAsrClient
 from app.services.orchestrator import Orchestrator
@@ -23,6 +25,7 @@ async def voice_ws(websocket: WebSocket) -> None:
     # - 连接内可交织：vad_event / audio_chunk / turn_commit_request / cancel。
     # - speech_start 时预建腾讯 ASR WebSocket，避免首包音频与建连竞态及 15 秒空闲超时。
     await websocket.accept()
+    WS_CONNECTIONS_ACTIVE.inc()
     logger.info("voice websocket connected")
     asr_event_buffer: list[dict] = []
     latest_turn_by_session: dict[str, str] = {}
@@ -70,12 +73,40 @@ async def voice_ws(websocket: WebSocket) -> None:
             ),
         )
 
-    orchestrator = Orchestrator(send_event=websocket.send_json)
+    orchestrator = Orchestrator(send_event=websocket.send_json, turn_manager=turn_manager)
+    active_turn_tasks: dict[tuple[str, str], asyncio.Task[str]] = {}
+    greeting_task: asyncio.Task[None] | None = None
+    greeting_dispatched = False
+
+    def _log_turn_task_result(task: asyncio.Task[str], session_id: str, turn_id: str) -> None:
+        if task.cancelled():
+            logger.info("turn task cancelled: session_id=%s turn_id=%s", session_id, turn_id)
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(
+                "turn task failed: session_id=%s turn_id=%s",
+                session_id,
+                turn_id,
+                exc_info=exc,
+            )
+
     try:
         while True:
             payload = await websocket.receive_json()
             event_type = payload.get("type", "")
             try:
+                if event_type == "session_init":
+                    session_id = str(payload.get("session_id", "")).strip()
+                    if session_id and not greeting_dispatched:
+                        greeting_dispatched = True
+                        session_manager.get_or_create(session_id)
+                        greeting_task = asyncio.create_task(
+                            orchestrator.send_session_greeting(session_id),
+                            name=f"session_greeting:{session_id}",
+                        )
+                    continue
+
                 if event_type == "vad_event":
                     event = VadEvent.model_validate(payload)
                     latest_turn_by_session[event.session_id] = event.turn_id
@@ -115,12 +146,14 @@ async def voice_ws(websocket: WebSocket) -> None:
                         event.turn_id,
                         cancelled,
                     )
-                    session_manager.set_status(event.session_id, "interrupted")
+                    if cancelled:
+                        session_manager.set_status(event.session_id, "interrupted")
                     await websocket.send_json(
                         {
                             "type": "cancel_ack",
                             "session_id": event.session_id,
                             "turn_id": event.turn_id,
+                            "generation_id": event.generation_id,
                             "cancelled": cancelled,
                         }
                     )
@@ -131,6 +164,19 @@ async def voice_ws(websocket: WebSocket) -> None:
                     continue
 
                 event = TurnCommitRequestEvent.model_validate(payload)
+                user_text = event.reason.strip()
+                if not user_text:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "session_id": event.session_id,
+                            "turn_id": event.turn_id,
+                            "error_code": "EMPTY_USER_TEXT",
+                            "message": "提交内容不能为空",
+                        }
+                    )
+                    continue
+
                 session_manager.get_or_create(event.session_id)
                 committed = turn_manager.commit_turn_once(event.session_id, event.turn_id)
 
@@ -153,10 +199,11 @@ async def voice_ws(websocket: WebSocket) -> None:
                 session_manager.set_status(event.session_id, "thinking")
                 generation_id = turn_manager.get_generation_id(event.session_id, event.turn_id)
                 logger.info(
-                    "turn committed: session_id=%s turn_id=%s generation_id=%s",
+                    "turn committed: session_id=%s turn_id=%s generation_id=%s input_mode=%s",
                     event.session_id,
                     event.turn_id,
                     generation_id,
+                    event.input_mode,
                 )
                 await websocket.send_json(
                     {
@@ -166,8 +213,46 @@ async def voice_ws(websocket: WebSocket) -> None:
                         "generation_id": generation_id,
                     }
                 )
-                await orchestrator.run_turn(event.session_id, event.turn_id, event.reason)
-                session_manager.set_status(event.session_id, "speaking")
+
+                turn_key = (event.session_id, event.turn_id)
+                prev_task = active_turn_tasks.pop(turn_key, None)
+                if prev_task is not None and not prev_task.done():
+                    prev_task.cancel()
+
+                async def _run_turn_bg(
+                    sid: str = event.session_id,
+                    tid: str = event.turn_id,
+                    gid: str = generation_id,
+                    text: str = user_text,
+                    trace: str = event.trace_id,
+                    mode: str = event.input_mode,
+                ) -> str:
+                    return await orchestrator.run_turn(
+                        sid,
+                        tid,
+                        text,
+                        generation_id=gid,
+                        trace_id=trace,
+                        input_mode=mode,
+                    )
+
+                turn_task = asyncio.create_task(_run_turn_bg(), name=f"turn:{event.session_id}:{event.turn_id}")
+
+                def _on_turn_done(task: asyncio.Task[str], sid: str = event.session_id, tid: str = event.turn_id) -> None:
+                    active_turn_tasks.pop((sid, tid), None)
+                    _log_turn_task_result(task, sid, tid)
+                    try:
+                        outcome = task.result()
+                    except Exception:
+                        session_manager.set_status(sid, "listening")
+                        return
+                    if outcome == "cancelled":
+                        session_manager.set_status(sid, "interrupted")
+                    else:
+                        session_manager.set_status(sid, "listening")
+
+                turn_task.add_done_callback(_on_turn_done)
+                active_turn_tasks[turn_key] = turn_task
             except Exception as exc:
                 logger.exception("voice event processing failed: event_type=%s", event_type)
                 await websocket.send_json(
@@ -180,3 +265,10 @@ async def voice_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("voice websocket disconnected")
         return
+    finally:
+        if greeting_task is not None and not greeting_task.done():
+            greeting_task.cancel()
+        for task in list(active_turn_tasks.values()):
+            if not task.done():
+                task.cancel()
+        WS_CONNECTIONS_ACTIVE.dec()

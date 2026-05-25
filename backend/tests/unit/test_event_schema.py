@@ -35,6 +35,20 @@ def test_turn_commit_request_valid_payload() -> None:
     assert event.reason == "vad_timeout"
 
 
+def test_turn_commit_request_text_mode() -> None:
+    event = TurnCommitRequestEvent(
+        type="turn_commit_request",
+        session_id="session-1",
+        turn_id="turn-1",
+        seq=1,
+        trace_id="trace-1",
+        timestamp_ms=1715670000000,
+        reason="算力平台试用期限多久？",
+        input_mode="text",
+    )
+    assert event.input_mode == "text"
+
+
 def test_audio_chunk_event_has_defaults() -> None:
     event = AudioChunkEvent(
         type="audio_chunk",

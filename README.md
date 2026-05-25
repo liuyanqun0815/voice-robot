@@ -151,6 +151,17 @@ npm run dev
 
 打开 http://127.0.0.1:5173 ，点击 **开启语音**。WebSocket 默认：`ws://127.0.0.1:8000/ws/voice`。
 
+### 4. 运维仪表盘（可观测 + 可审计）
+
+在 `backend/.env` 中开启审计并设置管理密钥：
+
+```env
+VOICE_ROBOT_AUDIT_ENABLED=true
+VOICE_ROBOT_AUDIT_ADMIN_API_KEY=你的管理密钥
+```
+
+前端顶部导航进入 **运维仪表盘**，或访问 http://127.0.0.1:5173/#/ops ，填入同一 API Key 即可查看 Prometheus 指标与会话审计流水。
+
 ## 运行模式
 
 | 模式 | 配置 | 行为 |

@@ -7,9 +7,16 @@ export type BaseEvent = {
   timestamp_ms: number;
 };
 
+export type InputMode = "voice" | "text";
+
+export type SessionInitEvent = BaseEvent & {
+  type: "session_init";
+};
+
 export type TurnCommitRequestEvent = BaseEvent & {
   type: "turn_commit_request";
   reason: string;
+  input_mode?: InputMode;
 };
 
 export type AudioChunkEvent = BaseEvent & {

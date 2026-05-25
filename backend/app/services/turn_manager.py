@@ -41,3 +41,14 @@ class TurnManager:
                 return False
             state.generation_id = ""
             return True
+
+    def is_generation_active(self, session_id: str, turn_id: str, generation_id: str) -> bool:
+        """generation 未被 cancel 时返回 True（generation_id 非空且与登记一致）。"""
+        if not generation_id:
+            return False
+        key = (session_id, turn_id)
+        with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                return False
+            return state.generation_id == generation_id

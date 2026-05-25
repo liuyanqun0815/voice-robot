@@ -17,6 +17,8 @@ class BaseVoiceEvent(BaseModel):
 class TurnCommitRequestEvent(BaseVoiceEvent):
     type: Literal["turn_commit_request"] = "turn_commit_request"
     reason: str
+    # voice：reason 为 ASR 文本；text：reason 为用户在输入框提交的文本
+    input_mode: Literal["voice", "text"] = "voice"
 
 
 class AudioChunkEvent(BaseVoiceEvent):

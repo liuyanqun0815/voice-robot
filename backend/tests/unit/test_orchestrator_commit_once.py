@@ -21,7 +21,7 @@ def test_run_turn_emits_llm_tts_and_complete() -> None:
     sink: list[dict[str, str]] = []
     orchestrator = Orchestrator(send_event=sink.append)
 
-    asyncio.run(orchestrator.run_turn("s1", "t1", "帮我查订单"))
+    asyncio.run(orchestrator.run_turn("s1", "t1", "帮我查订单", generation_id="g_t1"))
 
     event_types = [event["type"] for event in sink]
     assert "llm_delta" in event_types
