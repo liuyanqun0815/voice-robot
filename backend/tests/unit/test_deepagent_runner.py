@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -9,6 +10,49 @@ from app.core.settings import Settings
 from app.services.agents.deepagent_runner import DeepAgentRunner
 
 _MOCK_TEXT = "好的，我正在为你处理"
+
+
+def test_default_system_prompt_uses_customer_manager_tone() -> None:
+    settings = Settings()
+
+    prompt = settings.deepagent_system_prompt
+
+    assert "客服经理" in prompt
+    assert "亲切" in prompt
+    assert "耐心" in prompt
+    assert "专业" in prompt
+    assert "禁止出现“知识库”" in prompt
+
+
+def test_default_system_prompt_is_structured_multiline() -> None:
+    prompt = Settings().deepagent_system_prompt
+
+    assert "\n## 身份与语气\n" in prompt
+    assert "\n## 回答原则\n" in prompt
+    assert "\n## 禁止事项\n" in prompt
+    assert "\n## 依据不足时\n" in prompt
+
+
+def test_system_prompt_unescapes_newlines() -> None:
+    settings = Settings(deepagent_system_prompt="第一行\\n第二行")
+
+    assert settings.deepagent_system_prompt == "第一行\n第二行"
+
+
+def test_readiness_missing_items_skips_tts_credentials_when_tts_disabled() -> None:
+    settings = Settings(
+        mock_streaming_enabled=False,
+        tts_enabled=False,
+        tencent_asr_app_id="app-id",
+        tencent_asr_secret_id=SecretStr("secret-id"),
+        tencent_asr_secret_key=SecretStr("secret-key"),
+        deepagent_ark_api_key=SecretStr("ark-key"),
+    )
+
+    missing = settings.readiness_missing_items()
+
+    assert "VOICE_ROBOT_VOLCANO_TTS_APP_ID" not in missing
+    assert "VOICE_ROBOT_VOLCANO_TTS_ACCESS_TOKEN" not in missing
 
 
 def test_deepagent_runner_returns_sentences_mock() -> None:

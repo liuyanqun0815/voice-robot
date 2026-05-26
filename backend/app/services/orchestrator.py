@@ -6,6 +6,8 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from app.core.metrics import LLM_FIRST_TOKEN_SECONDS, TURN_DURATION_SECONDS, TURN_TOTAL
 from app.core.request_context import bind_voice_context, reset_wiki_audit
 from app.core.settings import Settings
@@ -153,7 +155,7 @@ class Orchestrator:
             return
         self._logger.info("session greeting: session_id=%s chars=%s", session_id or "-", len(text))
         await self._stream_greeting_text(session_id, text)
-        if not self._settings.greeting_tts_enabled:
+        if not self._settings.tts_enabled:
             return
         punct_buf = PunctuationStreamBuffer()
         chunk_index = 0
@@ -194,7 +196,7 @@ class Orchestrator:
         trace_id: str = "",
         input_mode: str = "voice",
     ) -> str:
-        """DeepAgent 流式文本 → 标点切段 → 分段流式 TTS → WebSocket 下发。
+        """DeepAgent 流式文本 → 标点切段 → 可选分段流式 TTS → WebSocket 下发。
 
         返回 ``ok`` / ``cancelled`` / ``error``。cancel 后不再向客户端推送 llm/tts 事件。
         """
@@ -221,6 +223,7 @@ class Orchestrator:
         punct_buf = PunctuationStreamBuffer()
         chunk_index = 0
         should_continue = lambda: self._generation_alive(session_id, turn_id, generation_id)
+        history_before_turn = self._agent_runner.get_thread_messages(session_id)
 
         agent_input = await enrich_user_text_for_agent(user_text, self._settings)
         if agent_input != user_text:
@@ -254,6 +257,8 @@ class Orchestrator:
                         "text": delta,
                     }
                 )
+                if not self._settings.tts_enabled:
+                    continue
                 for sentence in punct_buf.feed(delta):
                     if not should_continue():
                         result = "cancelled"
@@ -265,7 +270,11 @@ class Orchestrator:
                 if result == "cancelled":
                     break
 
-            if result != "cancelled" and should_continue():
+            if result != "cancelled" and not should_continue():
+                result = "cancelled"
+                status = "cancelled"
+
+            if result != "cancelled" and should_continue() and self._settings.tts_enabled:
                 tail = punct_buf.drain()
                 if tail:
                     chunk_index = await self._stream_tts_for_sentence(
@@ -294,6 +303,13 @@ class Orchestrator:
             error_code = "ORCHESTRATOR_FAILED"
             raise
         finally:
+            if result == "cancelled":
+                self._agent_runner.close_stream(sync_gen)
+                partial_text = "".join(assistant_parts).strip()
+                patched_messages = [*history_before_turn, HumanMessage(content=user_text)]
+                if partial_text:
+                    patched_messages.append(AIMessage(content=partial_text))
+                self._agent_runner.replace_thread_messages(session_id, patched_messages)
             latency_ms = int((time.perf_counter() - started) * 1000)
             assistant_text = "".join(assistant_parts)
             TURN_DURATION_SECONDS.labels(stage="e2e").observe(latency_ms / 1000.0)

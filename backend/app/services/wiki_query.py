@@ -7,13 +7,42 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+
+try:
+    import jieba  # pyright: ignore[reportMissingImports]
+except ImportError:  # pragma: no cover
+    jieba = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
 # llm-wiki-agent query.py caps context pages
 MAX_RELEVANT_PAGES = 10
 GRAPH_MIN_CONFIDENCE = 0.7
+_APP_ROOT = Path(__file__).resolve().parent.parent
+_RESOURCE_DIR = _APP_ROOT / "resources"
+_JIEBA_USER_DICT_PATH = _RESOURCE_DIR / "jieba_user_dict.txt"
+_JIEBA_STOPWORDS_PATH = _RESOURCE_DIR / "jieba_stopwords.txt"
+_DEFAULT_STOP_WORDS = {
+    "的",
+    "和",
+    "是",
+    "我",
+    "在",
+    "这个",
+    "那个",
+    "这里",
+    "那边",
+    "这边",
+    "请问",
+    "一下",
+    "麻烦",
+    "帮忙",
+    "您好",
+    "老师",
+}
+_JIEBA_RESOURCES_LOADED = False
 
 _WIKILINK_RE = re.compile(r"\[\[(分类|问答|概念)-([^\]]+)\]\]")
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
@@ -23,6 +52,9 @@ _SECTION_FAQ_RE = re.compile(
     re.MULTILINE,
 )
 _STANDARD_ANSWER_RE = re.compile(r"##\s*标准回答\s*\n+([\s\S]*?)(?=\n##\s|\Z)")
+_SUPPORT_PHRASE_RE = re.compile(
+    r"不存在|未找到|失败|报错|异常|超时|无效|错误|失效|限流|拒绝|权限|过期"
+)
 
 @dataclass
 class IndexPagePick:
@@ -324,23 +356,34 @@ def select_index_pages_via_llm(
 
 
 def extract_keywords(question: str) -> list[str]:
-    """Extract Chinese / Latin tokens for matching (no jieba)."""
+    """Extract keywords with mixed jieba + regex strategy."""
     text = question.strip()
     if not text:
         return []
 
     seen: set[str] = set()
     tokens: list[str] = []
+    stop_words = load_stop_words()
+    ensure_jieba_resources_loaded()
 
     def add(token: str) -> None:
         token = token.strip().lower()
-        if len(token) < 2 or token in seen:
+        if len(token) < 2 or token in seen or token in stop_words:
             return
         seen.add(token)
         tokens.append(token)
 
     for match in re.finditer(r"[\u4e00-\u9fff]{2,}", text):
         segment = match.group()
+        if jieba is not None:
+            for token in jieba.cut_for_search(segment, HMM=True):
+                add(token)
+            for token in jieba.lcut(segment, HMM=True):
+                add(token)
+            for phrase in _SUPPORT_PHRASE_RE.findall(segment):
+                add(phrase)
+            continue
+
         add(segment)
         if len(segment) >= 3:
             for size in (2, 3, 4):
@@ -353,6 +396,28 @@ def extract_keywords(question: str) -> list[str]:
         add(match.group())
 
     return tokens[:40]
+
+
+def ensure_jieba_resources_loaded() -> None:
+    global _JIEBA_RESOURCES_LOADED
+
+    if jieba is None or _JIEBA_RESOURCES_LOADED:
+        return
+    if _JIEBA_USER_DICT_PATH.is_file():
+        jieba.load_userdict(str(_JIEBA_USER_DICT_PATH))
+    _JIEBA_RESOURCES_LOADED = True
+
+
+@lru_cache(maxsize=1)
+def load_stop_words() -> set[str]:
+    words = {word.strip().lower() for word in _DEFAULT_STOP_WORDS if word.strip()}
+    if _JIEBA_STOPWORDS_PATH.is_file():
+        for line in _JIEBA_STOPWORDS_PATH.read_text(encoding="utf-8").splitlines():
+            word = line.strip().lower()
+            if not word or word.startswith("#"):
+                continue
+            words.add(word)
+    return words
 
 
 def parse_index_categories(index_text: str) -> list[CategoryEntry]:

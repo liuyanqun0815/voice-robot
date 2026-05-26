@@ -12,6 +12,7 @@ dependencies = [
     "deepagents",
     "fastapi",
     "httpx",
+    "jieba",
     "langchain",
     "langchain-openai",
     "langgraph",
@@ -48,3 +49,6 @@ target-version = ["py311"]
 where = ["."]
 include = ["app*"]
 exclude = ["vendor*", "tests*", "*.egg-info"]
+
+[tool.setuptools.package-data]
+app = ["resources/*.txt"]

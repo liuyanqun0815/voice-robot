@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
+from app.core.settings import Settings
 from app.main import app
 
 
@@ -34,7 +35,10 @@ def test_ws_accepts_turn_commit_request() -> None:
                 break
 
         assert "llm_delta" in event_types
-        assert "tts_chunk" in event_types
+        if Settings().tts_enabled:
+            assert "tts_chunk" in event_types
+        else:
+            assert "tts_chunk" not in event_types
         assert "audio_complete" in event_types
 
 

@@ -3,8 +3,9 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage
 from langgraph.store.memory import InMemoryStore
 
 from app.core.request_context import get_voice_context
@@ -32,6 +33,11 @@ class DeepAgentRunner:
         self._agent_name = "deepagent_langchain"
         self._agent = None
         self._greeting_seeded_threads: set[str] = set()
+
+    def _ensure_agent(self):
+        if self._agent is None:
+            self._agent = self._build_agent()
+        return self._agent
 
     def _build_agent(self):
         if not self._settings.deepagent_enabled:
@@ -159,6 +165,45 @@ class DeepAgentRunner:
             self._greeting_seeded_threads.add(thread_id)
         messages.append({"role": "user", "content": user_text})
         return messages
+
+    def _prepend_missing_greeting(self, thread_id: str, messages: list[BaseMessage]) -> list[BaseMessage]:
+        greeting = self._settings.greeting_text.strip()
+        if not thread_id or not self._settings.greeting_enabled or not greeting:
+            return messages
+        if any(
+            isinstance(msg, AIMessage) and self._normalize_message_content(msg.content).strip() == greeting
+            for msg in messages
+        ):
+            return messages
+        return [AIMessage(content=greeting), *messages]
+
+    def get_thread_messages(self, thread_id: str) -> list[BaseMessage]:
+        """读取当前 thread 的 messages 快照；首轮前若尚未持久化，补上开场白。"""
+        agent = self._ensure_agent()
+        messages: list[BaseMessage] = []
+        if agent is not None:
+            snapshot = agent.get_state({"configurable": {"thread_id": thread_id}})
+            values = getattr(snapshot, "values", None) or {}
+            raw_messages = values.get("messages") or []
+            messages = [msg for msg in raw_messages if isinstance(msg, BaseMessage)]
+        return self._prepend_missing_greeting(thread_id, messages)
+
+    def replace_thread_messages(self, thread_id: str, messages: list[BaseMessage]) -> None:
+        """用完整 messages 覆盖当前 thread 历史。"""
+        agent = self._ensure_agent()
+        if agent is None:
+            return
+        agent.update_state(
+            {"configurable": {"thread_id": thread_id}},
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]},
+            as_node="model",
+        )
+
+    @staticmethod
+    def close_stream(stream_obj: Iterator[str]) -> None:
+        close = getattr(stream_obj, "close", None)
+        if callable(close):
+            close()
 
     def stream_assistant_text(self, user_text: str, *, thread_id: str) -> Iterator[str]:
         """流式产出助手回复文本增量（字符级），供编排层按标点缓冲后送 TTS。

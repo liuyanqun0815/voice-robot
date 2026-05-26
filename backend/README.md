@@ -26,7 +26,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 - `VOICE_ROBOT_GREETING_ENABLED=true`
 - `VOICE_ROBOT_GREETING_TEXT=...`（多行用 `\n`）
-- `VOICE_ROBOT_GREETING_TTS_ENABLED=true`（是否朗读）
+- `VOICE_ROBOT_TTS_ENABLED=true`（总开关；关闭后开场白 TTS 与回答阶段实时 TTS 一并停用，仅保留文本流式）
 - `VOICE_ROBOT_GREETING_STREAM_CHUNK_CHARS=2`、`VOICE_ROBOT_GREETING_STREAM_INTERVAL_MS=40`（流式打字机节奏）
 - 开场白会在同 `session_id` 的**首轮 LLM 调用**中作为 `AIMessage` 注入 `messages` 输入；随后由 checkpointer 持久化，后续多轮 LLM 可见该上下文
 
@@ -47,7 +47,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `app/ws/voice_endpoint.py` | WebSocket 入口，VAD/音频/提交编排 |
 | `app/services/asr/tencent_ws_client.py` | 腾讯实时 ASR |
 | `app/services/agents/deepagent_runner.py` | DeepAgent + Ark 流式（`stream_mode=messages`） |
-| `app/services/orchestrator.py` | 标点切段 → TTS 流式下发；建连后 `session_greeting` 开场白 |
+| `app/services/orchestrator.py` | 标点切段 → 可选 TTS 流式下发；建连后 `session_greeting` 开场白 |
 | `app/services/tts/volcano_ws_client.py` | 火山 TTS v3 |
 
 ## 测试

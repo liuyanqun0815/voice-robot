@@ -40,6 +40,26 @@ def test_extract_keywords_chinese() -> None:
     assert "期限" in keywords
 
 
+def test_extract_keywords_mixed_mode_avoids_noisy_cjk_bigrams() -> None:
+    keywords = extract_keywords("422 Model Not Exist 错误，模型不存在，如何解决？")
+
+    assert "model" in keywords
+    assert "exist" in keywords
+    assert "模型" in keywords
+    assert "不存在" in keywords
+    assert "型不" not in keywords
+
+
+def test_extract_keywords_uses_custom_dict_and_stopwords() -> None:
+    keywords = extract_keywords("请问一下，这个核心节点邀测计划怎么参加？")
+
+    assert "核心节点" in keywords
+    assert "邀测计划" in keywords
+    assert "请问" not in keywords
+    assert "一下" not in keywords
+    assert "这个" not in keywords
+
+
 def test_title_matches_question_cjk_bigram() -> None:
     assert title_matches_question("账户充值与计费", "试用期限和计费")
     assert not title_matches_question("科学软件与许可证", "openclaw使用期限")

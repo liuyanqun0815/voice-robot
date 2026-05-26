@@ -84,6 +84,8 @@ jiter==0.14.0
     # via
     #   anthropic
     #   openai
+jieba==0.42.1
+    # via voice-robot-backend (pyproject.toml)
 jsonpatch==1.33
     # via langchain-core
 jsonpointer==3.1.1

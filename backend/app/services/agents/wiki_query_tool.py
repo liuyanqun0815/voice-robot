@@ -80,6 +80,12 @@ def build_query_kefu_wiki_tool(
     def query_kefu_wiki(question: str) -> str:
         """检索客服知识库 wiki，返回主题页、FAQ 标准回答与来源路径。
 
+        参数说明：
+        - `question` 需要尽可能完整表达客户的问题，优先保留客户原意。
+        - 如果客户表述过短、存在指代、缺少上下文，可在不改变原意的前提下，
+          必要时补充主语、谓语、对象或场景，整理成更适合检索的问句。
+        - 不要编造客户未提供的关键事实，不要擅自增加时间、账号、额度、报错码等细节。
+
         检索流程：index 标题/分类匹配 → graph 邻居 → 关键词 FAQ；
         若未匹配到相关分类关系，则从 index.md 由大模型选最相关 n 页并载入正文（需 VOICE_ROBOT_WIKI_QUERY_LLM_FALLBACK_ENABLED）。
         请仅根据返回内容用简洁中文作答，并保留来源路径；无依据时说明知识库未收录。

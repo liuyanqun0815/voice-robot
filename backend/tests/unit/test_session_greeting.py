@@ -14,7 +14,7 @@ def test_send_session_greeting_streams_deltas() -> None:
     orchestrator._settings = Settings(
         greeting_enabled=True,
         greeting_text="你好！",
-        greeting_tts_enabled=False,
+        tts_enabled=False,
         greeting_stream_chunk_chars=2,
         greeting_stream_interval_ms=0,
     )
@@ -36,6 +36,23 @@ def test_send_session_greeting_skipped_when_disabled() -> None:
     asyncio.run(orchestrator.send_session_greeting())
 
     assert sink == []
+
+
+def test_send_session_greeting_skips_tts_when_tts_disabled() -> None:
+    sink: list[dict] = []
+    orchestrator = Orchestrator(send_event=sink.append)
+    orchestrator._settings = Settings(
+        greeting_enabled=True,
+        greeting_text="你好！",
+        tts_enabled=False,
+        greeting_stream_chunk_chars=2,
+        greeting_stream_interval_ms=0,
+    )
+
+    asyncio.run(orchestrator.send_session_greeting("session-1"))
+
+    types = [event["type"] for event in sink]
+    assert types == ["greeting_delta", "greeting_delta", "greeting_complete"]
 
 
 def test_greeting_text_unescapes_newlines() -> None:
