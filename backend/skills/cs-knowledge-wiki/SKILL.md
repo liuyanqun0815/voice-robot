@@ -17,7 +17,7 @@ wiki/
 ├── index.md           # 可读知识索引（按主题分类，仅 FAQ/流程）
 ├── log.md             # 追加式操作日志
 ├── overview.md        # 跨主题总览
-├── categories/        # 主题页：**内含该主题全部 FAQ 总结 + 操作流程汇总**
+├── categories/        # 主题页：**内含该主题 热点FAQ 总结 + 操作流程汇总**
 ├── faqs/              # 合并后的客户问答（相似问题合一文件）
 ├── concepts/          # 产品概念（**从 FAQ 归纳**，非独立编造）
 └── syntheses/         # query 答案归档

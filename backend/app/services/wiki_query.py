@@ -176,8 +176,12 @@ def wiki_page_id(path: Path, wiki_root: Path) -> str:
     return path.relative_to(wiki_root).as_posix().replace(".md", "")
 
 
-def find_relevant_pages_from_index(question: str, index_content: str, wiki_root: Path) -> list[Path]:
-    """Match index markdown links and ### section titles (llm-wiki query.py)."""
+def text_matches_keywords(text: str, keywords: list[str]) -> bool:
+    return score_text(keywords, text) > 0
+
+
+def find_relevant_pages_from_index(keywords: list[str], index_content: str, wiki_root: Path) -> list[Path]:
+    """按关键词匹配 index 标题/高频词并映射到分类或概念页面。"""
     relevant: list[Path] = []
     seen: set[Path] = set()
 
@@ -187,8 +191,13 @@ def find_relevant_pages_from_index(question: str, index_content: str, wiki_root:
             relevant.append(path)
 
     for title, href in _MD_LINK_RE.findall(index_content):
-        if title_matches_question(title, question):
-            add((wiki_root / href).resolve())
+        if not text_matches_keywords(title, keywords):
+            continue
+        rel_href = href.replace("\\", "/").lstrip("/")
+        if rel_href in {"index.md", "overview.md"}:
+            continue
+        if rel_href.startswith("categories/") or rel_href.startswith("concepts/"):
+            add((wiki_root / rel_href).resolve())
 
     blocks = re.split(r"\n###\s+", index_content)
     for block in blocks[1:]:
@@ -196,21 +205,29 @@ def find_relevant_pages_from_index(question: str, index_content: str, wiki_root:
         if not lines:
             continue
         section_title = lines[0].strip()
-        block_matched = title_matches_question(section_title, question)
+        block_matched = text_matches_keywords(section_title, keywords)
         if not block_matched:
             for line in lines[1:]:
-                if line.strip().startswith("- ") and title_matches_question(line.strip()[2:], question):
+                if line.strip().startswith("- ") and text_matches_keywords(line.strip()[2:], keywords):
                     block_matched = True
                     break
         if not block_matched:
             continue
         for line in lines[1:]:
             link_match = _WIKILINK_RE.search(line)
-            if link_match and link_match.group(1) == "分类":
+            if not link_match:
+                continue
+            prefix = link_match.group(1)
+            if prefix == "分类":
                 wikilink = f"分类-{link_match.group(2)}"
                 cat_path = resolve_wiki_file(wiki_root, "categories", wikilink)
                 if cat_path is not None:
                     add(cat_path)
+            elif prefix == "概念":
+                wikilink = f"概念-{link_match.group(2)}"
+                concept_path = resolve_wiki_file(wiki_root, "concepts", wikilink)
+                if concept_path is not None:
+                    add(concept_path)
 
     return relevant
 
@@ -539,6 +556,83 @@ def extract_faq_links_from_category(category_text: str) -> list[str]:
     return names
 
 
+def extract_wiki_links(markdown: str) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    for match in _WIKILINK_RE.finditer(markdown):
+        link_name = f"{match.group(1)}-{match.group(2)}".split("（")[0].strip()
+        if link_name and link_name not in seen:
+            seen.add(link_name)
+            links.append(link_name)
+    return links
+
+
+def gather_related_links(root: Path, start_paths: list[Path], max_depth: int = 2) -> dict[str, set[Path]]:
+    """从分类/概念页面递归提取链接，返回分类/概念/FAQ 关联集合。"""
+    related: dict[str, set[Path]] = {"category": set(), "concept": set(), "faq": set()}
+    queue: list[tuple[Path, int]] = [(path, 0) for path in start_paths]
+    visited: set[Path] = set()
+
+    while queue:
+        path, depth = queue.pop(0)
+        if path in visited or not path.is_file():
+            continue
+        visited.add(path)
+
+        hit_type = _hit_type_for_path(path, root)
+        if hit_type in ("category", "concept", "faq"):
+            related[hit_type].add(path)
+
+        if depth >= max_depth:
+            continue
+
+        text = read_text(path, max_chars=20000)
+        for link_name in extract_wiki_links(text):
+            if link_name.startswith("分类-"):
+                linked = resolve_wiki_file(root, "categories", link_name)
+            elif link_name.startswith("概念-"):
+                linked = resolve_wiki_file(root, "concepts", link_name)
+            elif link_name.startswith("问答-"):
+                linked = resolve_wiki_file(root, "faqs", link_name)
+            else:
+                linked = None
+            if linked is not None and linked not in visited:
+                queue.append((linked, depth + 1))
+    return related
+
+
+def compute_hit_confidence(
+    *,
+    keywords: list[str],
+    title: str,
+    full_text: str,
+    source_route: str,
+    hit_type: str,
+    link_boost: float = 0.0,
+) -> float:
+    """把关键词命中转换为 0~1 置信度，并叠加路由加权。"""
+    if not keywords:
+        return 0.0
+    title_score = score_text(keywords, title)
+    content_score = score_text(keywords, full_text)
+    base = (title_score * 2.5 + content_score) / (len(keywords) * 3.5)
+    route_bonus = {
+        "index_exact": 0.25,
+        "global_scan": 0.10,
+        "link_traversal": 0.15,
+        "index_llm_select": 0.12,
+    }.get(source_route, 0.0)
+    type_bonus = {
+        "category": 0.20,
+        "concept": 0.18,
+        "faq": 0.05,
+        "overview": -0.30,
+        "page": 0.0,
+    }.get(hit_type, 0.0)
+    confidence = base + route_bonus + type_bonus + link_boost
+    return max(0.0, min(1.0, confidence))
+
+
 def rank_faq_files(
     wiki_root: Path,
     keywords: list[str],
@@ -624,7 +718,6 @@ def path_to_hit(
     wiki_root: Path,
     *,
     keywords: list[str],
-    question: str,
     source_route: str,
     preloaded_text: str | None = None,
 ) -> RetrievalHit | None:
@@ -655,35 +748,33 @@ def path_to_hit(
         rel_path=rel_path,
         title=title,
         excerpt=excerpt,
-        score=score_text(keywords, title, full_text, question),
+        score=compute_hit_confidence(
+            keywords=keywords,
+            title=title,
+            full_text=full_text,
+            source_route=source_route,
+            hit_type=hit_type,
+        ),
         hit_type=hit_type,
         source_route=source_route,
     )
 
 
-def _merge_hits(
-    categories: list[RetrievalHit],
-    faqs: list[RetrievalHit],
-    concepts: list[RetrievalHit],
-    new_hit: RetrievalHit,
+def _build_sorted_buckets(
+    hits: list[RetrievalHit],
     *,
     max_categories: int,
     max_faqs: int,
     max_concepts: int,
-) -> None:
-    bucket_map = {
-        "category": (categories, max_categories),
-        "faq": (faqs, max_faqs),
-        "concept": (concepts, max_concepts),
-        "overview": (categories, 1),
-        "page": (categories, max_categories),
-    }
-    bucket, limit = bucket_map.get(new_hit.hit_type, (categories, max_categories))
-    if any(item.rel_path == new_hit.rel_path for item in bucket):
-        return
-    if len(bucket) >= limit:
-        return
-    bucket.append(new_hit)
+) -> tuple[list[RetrievalHit], list[RetrievalHit], list[RetrievalHit]]:
+    category_hits = sorted(
+        [h for h in hits if h.hit_type in ("category", "overview", "page")], key=lambda item: item.score, reverse=True
+    )[:max_categories]
+    faq_hits = sorted([h for h in hits if h.hit_type == "faq"], key=lambda item: item.score, reverse=True)[:max_faqs]
+    concept_hits = sorted([h for h in hits if h.hit_type == "concept"], key=lambda item: item.score, reverse=True)[
+        :max_concepts
+    ]
+    return category_hits, faq_hits, concept_hits
 
 
 def retrieve_kefu_wiki(
@@ -697,18 +788,22 @@ def retrieve_kefu_wiki(
     max_pages: int = MAX_RELEVANT_PAGES,
     index_page_selector: IndexPageSelector | None = None,
 ) -> WikiRetrievalResult:
-    """客服 wiki 混合检索主入口。
+    """客服 wiki 混合检索主入口（关键词驱动版）。
 
-    流程概要：
-    1. 读 index.md，extract_keywords 抽检索词；
-    2. 阶段 A：overview → index 标题/高频/链接匹配 → graph 邻居 → 可选 LLM 选页；
-    3. 阶段 B：关键词 rank 主题 → 合并路径为 RetrievalHit → FAQ/概念补召回；
-    4. 返回 WikiRetrievalResult，由 query_kefu_wiki 工具格式化为 prompt 证据包。
+    当前检索流程：
+    1) 读取 `index.md`，仅从用户问题中抽取关键词（keywords）作为后续匹配依据；
+    2) 先按关键词匹配 `index.md` 的标题/条目，映射出分类或概念文件；
+       - 若 index 命中：只保留分类/概念作为种子，不回退全库扫描；
+       - 若 index 未命中：全量扫描 `categories/*.md` 与 `concepts/*.md`；
+    3) 以种子分类/概念递归提取 wiki 链接，扩展相关分类/概念，并最终拿到 FAQ 文件；
+    4) 候选文件统一计算置信度（分类/概念权重高于 FAQ），按分数排序后截断；
+    5) 若规则检索后仍无结果，且配置了 `index_page_selector`，使用 LLM 从 `index.md` 选页兜底。
 
-    检索阶段默认 0 次 LLM；index/分类未建立关联或最终无命中时，由 index_page_selector 读 index.md 选页（需开启配置）。
+    注意：
+    - `index.md` 仅作为路由和选页依据，不作为答案内容来源；
+    - 评分全程基于关键词命中，而不是直接使用原始问题文本做匹配。
     """
     root = Path(wiki_root)
-    repo = Path(repo_root) if repo_root is not None else root.parent
     index_path = root / "index.md"
     notes: list[str] = []
 
@@ -717,144 +812,96 @@ def retrieve_kefu_wiki(
 
     index_content = read_text(index_path)
     keywords = extract_keywords(question)
-    categories_meta = parse_index_categories(index_content)
-    index_llm_used = False
-    llm_page_contents: dict[Path, str] = {}
+    all_hits_by_path: dict[str, RetrievalHit] = {}
 
-    # 阶段 A 的候选路径（保持 enqueue 顺序 = 优先级），path_routes 记录命中原因供调试
-    ordered_paths: list[Path] = []
-    path_routes: dict[Path, str] = {}
-
-    def enqueue(path: Path, route: str) -> None:
-        if path not in path_routes:
-            ordered_paths.append(path)
-            path_routes[path] = route
-
-    # 与 llm-wiki query.py 相同：总览页始终加入，提供跨主题背景
-    overview = root / "overview.md"
-    if overview.is_file():
-        enqueue(overview, "overview")
-
-    # --- 阶段 A：index / graph 路由（对齐 llm-wiki query.py，无 LLM）---
-    # 扫描 index：### 主题标题、高频问题、[title](href)、[[分类-...]] → categories/*.md
-    for path in find_relevant_pages_from_index(question, index_content, root):
-        enqueue(path, "index_match")
-
-    # 若存在 kefu-know/graph/graph.json，对当前候选做 1 跳邻居扩展（边 confidence≥0.7）
-    expanded = expand_pages_via_graph(ordered_paths, root, repo)
-    if len(expanded) > len(ordered_paths):
-        notes.append("graph_neighbor")
-        for path in expanded:
-            if path not in path_routes:
-                enqueue(path, "graph_neighbor")
-
-    # index/分类规则未建立关联，或 index 命中过弱：Ark 读 index.md 选最相关 n 页，再载入正文（query_kefu_wiki 证据包）
-    if index_page_selector is not None and should_use_index_llm_select(
-        question,
-        keywords,
-        categories_meta,
-        ordered_paths,
-        path_routes,
-    ):
-        notes.append("index_llm_select")
-        index_llm_used = True
-        for pick in index_page_selector(question, index_content, root):
-            enqueue(pick.path, "index_llm_select")
-            llm_page_contents[pick.path] = pick.content
-
-    # 控制送入证据包的页面总量，避免超过模型上下文（默认 15，同 query.py）
-    ordered_paths = ordered_paths[:max_pages]
-
-    # --- 阶段 B：关键词补召回 + 与 index 路由结果合并 ---
-    picked_categories = rank_categories(question, keywords, categories_meta, limit=max_categories)
-    # 主题页内 [[问答-...]] 链接，供 FAQ 检索优先读取（高分 + 减少全库扫描）
-    preferred_faq_names: list[str] = []
-
-    category_hits: list[RetrievalHit] = []
-    faq_hits: list[RetrievalHit] = []
-    concept_hits: list[RetrievalHit] = []
-
-    # B1. 将阶段 A 的页面转为 RetrievalHit（按路径所在目录归入 category/faq/concept/overview）
-    for path in ordered_paths:
+    def add_hit(path: Path, route: str, *, preloaded_text: str | None = None, link_boost: float = 0.0) -> None:
         hit = path_to_hit(
             path,
             root,
             keywords=keywords,
-            question=question,
-            source_route=path_routes.get(path, ""),
-            preloaded_text=llm_page_contents.get(path),
+            source_route=route,
+            preloaded_text=preloaded_text,
         )
         if hit is None:
-            continue
-        _merge_hits(category_hits, faq_hits, concept_hits, hit, max_categories=max_categories, max_faqs=max_faqs, max_concepts=max_concepts)
-        if hit.hit_type == "category":
-            preferred_faq_names.extend(extract_faq_links_from_category(hit.excerpt))
-
-    # B2. 关键词排名的主题页（最多 max_categories），与 index_match 去重合并
-    for entry in picked_categories:
-        cat_path = resolve_wiki_file(root, "categories", entry.wikilink)
-        if cat_path is None:
-            continue
-        preferred_faq_names.extend(extract_faq_links_from_category(read_text(cat_path)))
-        hit = path_to_hit(
-            cat_path,
-            root,
+            return
+        hit.score = compute_hit_confidence(
             keywords=keywords,
-            question=question,
-            source_route="category_rank",
+            title=hit.title,
+            full_text=preloaded_text if preloaded_text is not None else read_text(path, max_chars=12000),
+            source_route=route,
+            hit_type=hit.hit_type,
+            link_boost=link_boost,
         )
-        if hit is not None:
-            _merge_hits(category_hits, faq_hits, concept_hits, hit, max_categories=max_categories, max_faqs=max_faqs, max_concepts=max_concepts)
+        existed = all_hits_by_path.get(hit.rel_path)
+        if existed is None or hit.score > existed.score:
+            all_hits_by_path[hit.rel_path] = hit
 
-    # B3. FAQ：优先 preferred 链接，再按文件名/正文关键词打分，FAQ 摘录「标准回答」字段
-    for path in rank_faq_files(root, keywords, question, preferred_faq_names, limit=max_faqs):
-        hit = path_to_hit(path, root, keywords=keywords, question=question, source_route="keyword_faq")
-        if hit is not None:
-            _merge_hits(category_hits, faq_hits, concept_hits, hit, max_categories=max_categories, max_faqs=max_faqs, max_concepts=max_concepts)
+    # 阶段 A：优先 index 路由。命中后仅走命中的分类/概念链路。
+    index_matches = find_relevant_pages_from_index(keywords, index_content, root)
+    index_match_found = bool(index_matches)
+    if index_match_found:
+        notes.append("index_match")
+        # 命中 index 后仅以分类/概念作为后续种子，不直接引入 FAQ，且不回退全库扫描。
+        index_matches = [p for p in index_matches if _hit_type_for_path(p, root) in ("category", "concept")]
+        if not index_matches:
+            notes.append("index_seed_empty")
+        for matched_path in index_matches:
+            add_hit(matched_path, "index_exact")
+    # 仅在 index 未命中时，才允许全量扫描分类/概念。
+    if not index_match_found:
+        notes.append("global_scan")
+        for path in (root / "categories").glob("*.md"):
+            add_hit(path, "global_scan")
+        for path in (root / "concepts").glob("*.md"):
+            add_hit(path, "global_scan")
 
-    # B4. 概念页：按关键词匹配 concepts/*.md（数量少，全目录扫描可接受）
-    for path in rank_concept_files(root, keywords, limit=max_concepts):
-        hit = path_to_hit(path, root, keywords=keywords, question=question, source_route="keyword_concept")
-        if hit is not None:
-            _merge_hits(category_hits, faq_hits, concept_hits, hit, max_categories=max_categories, max_faqs=max_faqs, max_concepts=max_concepts)
+    # 阶段 B：从分类/概念种子递归扩展链接，补齐关联分类/概念与 FAQ。
+    seed_paths = [root / hit.rel_path for hit in all_hits_by_path.values() if hit.hit_type in ("category", "concept")]
+    related = gather_related_links(root, seed_paths)
+    for category_path in related["category"]:
+        add_hit(category_path, "link_traversal", link_boost=0.05)
+    for concept_path in related["concept"]:
+        add_hit(concept_path, "link_traversal", link_boost=0.05)
+    for faq_path in related["faq"]:
+        add_hit(faq_path, "link_traversal", link_boost=0.10)
 
-    # 规则检索仍无实质内容时，最后再走一次 index LLM 选页并加载文档
-    if (
-        not category_hits
-        and not faq_hits
-        and not concept_hits
-        and index_page_selector is not None
-        and not index_llm_used
-    ):
+    # 阶段 C：统一置信度排序并按类型截断。
+    top_hits = sorted(all_hits_by_path.values(), key=lambda item: item.score, reverse=True)[:max_pages]
+    category_hits, faq_hits, concept_hits = _build_sorted_buckets(
+        top_hits,
+        max_categories=max_categories,
+        max_faqs=max_faqs,
+        max_concepts=max_concepts,
+    )
+
+    # 规则检索无命中时：LLM 兜底
+    if not category_hits and not faq_hits and not concept_hits and index_page_selector is not None:
         notes.append("index_llm_select")
+        fallback_hits: list[RetrievalHit] = []
         for pick in index_page_selector(question, index_content, root):
-            hit = path_to_hit(
+            fallback_hit = path_to_hit(
                 pick.path,
                 root,
                 keywords=keywords,
-                question=question,
                 source_route="index_llm_select",
                 preloaded_text=pick.content,
             )
-            if hit is None:
+            if fallback_hit is None:
                 continue
-            _merge_hits(
-                category_hits,
-                faq_hits,
-                concept_hits,
-                hit,
-                max_categories=max_categories,
-                max_faqs=max_faqs,
-                max_concepts=max_concepts,
+            fallback_hit.score = compute_hit_confidence(
+                keywords=keywords,
+                title=fallback_hit.title,
+                full_text=pick.content,
+                source_route="index_llm_select",
+                hit_type=fallback_hit.hit_type,
             )
-            if hit.hit_type == "category":
-                preferred_faq_names.extend(extract_faq_links_from_category(hit.excerpt))
-
-    # 检索说明写入结果，便于调试与 prompt 内展示（使用了哪些通道）
-    if "index_match" in path_routes.values() or any(h.source_route == "index_match" for h in category_hits + faq_hits):
-        notes.append("index_match")
-    if any(h.source_route == "keyword_faq" for h in faq_hits):
-        notes.append("keyword_faq")
+            fallback_hits.append(fallback_hit)
+        category_hits, faq_hits, concept_hits = _build_sorted_buckets(
+            sorted(fallback_hits, key=lambda item: item.score, reverse=True)[:max_pages],
+            max_categories=max_categories,
+            max_faqs=max_faqs,
+            max_concepts=max_concepts,
+        )
 
     return WikiRetrievalResult(
         question=question,
