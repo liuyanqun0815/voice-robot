@@ -11,6 +11,7 @@
 | 实时 ASR | 腾讯实时语音识别；`speech_start` 预建连，避免 15s 空闲超时 |
 | 流式 LLM | DeepAgent + Ark，`stream_mode=messages` 逐 token 输出 |
 | 流式 TTS | 火山 v3 双向 WebSocket，按标点切段合成 |
+| 客服知识检索 | 关键词驱动：`index.md` 命中优先 → 分类/概念递归链接 → FAQ，统一置信度排序，LLM 兜底 |
 | 打断 | `cancel` + `generation_id`，停止当前轮播报 |
 | 前端 UI | ASR 字幕、助手回复打字机效果、对话区自动滚动 |
 
@@ -72,6 +73,7 @@ voice-robot/
 │   │   ├── services/
 │   │   │   ├── asr/tencent_ws_client.py
 │   │   │   ├── agents/deepagent_runner.py
+│   │   │   ├── wiki_query.py
 │   │   │   ├── orchestrator.py
 │   │   │   └── tts/volcano_ws_client.py
 │   │   ├── schemas/events.py         # 上行事件 Pydantic 模型
@@ -217,6 +219,30 @@ VOICE_ROBOT_DEEPAGENT_ARK_MODEL=已开通的模型或接入点 ID
 
 权威定义与时序图：[docs/protocol.md](docs/protocol.md)。
 
+## 客服知识检索（Wiki RAG）
+
+后端检索入口：`backend/app/services/wiki_query.py::retrieve_kefu_wiki`。当前策略：
+
+1. 从用户问题抽取关键词（`keywords`）；
+2. 优先用关键词匹配 `backend/kefu-know/wiki/index.md`，映射到分类/概念；
+3. 如果 `index.md` 命中，则仅沿命中的分类/概念继续递归链接检索 FAQ，不回退全库扫描；
+4. 如果 `index.md` 未命中，才全量扫描 `categories/*.md` 与 `concepts/*.md`；
+5. 统一按置信度排序（分类/概念权重高于 FAQ）；
+6. 规则检索无结果时，使用 LLM 选页兜底。
+
+示例（调用检索）：
+
+```python
+from pathlib import Path
+from app.services.wiki_query import retrieve_kefu_wiki
+
+result = retrieve_kefu_wiki(
+    question="账号被限流怎么办",
+    wiki_root=Path("backend/kefu-know/wiki"),
+)
+print(result.to_prompt_text())
+```
+
 ## 测试
 
 ```bash
@@ -291,4 +317,4 @@ python -m black app tests --line-length 120
 
 ## License
 
-内部项目，未指定开源协议时请按团队规范使用。
+本项目采用 [Apache License 2.0](LICENSE) 开源协议。

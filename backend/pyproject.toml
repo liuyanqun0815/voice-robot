@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "FastAPI backend for voice-robot."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+
 dependencies = [
     "deepagents",
     "fastapi",
